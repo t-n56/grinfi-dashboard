@@ -3,8 +3,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import pandas_datareader as pdr
+import pandas_datareader.data as web  # Replaced yfinance
 from datetime import datetime, timedelta
 import requests
 import wbgapi as wb
@@ -118,7 +117,7 @@ class RealTimeDataValidator:
         self.sources = {
             'World Bank': wb.data,
             'Alpha Vantage': TimeSeries(key='YOUR_AV_KEY'),
-            'Yahoo Finance': yf,
+            'Market Data': web,  # Changed from yfinance to pandas_datareader
             'IMF': 'IMF_API_KEY',
             'Reuters': 'REUTERS_API_KEY',
             'Bloomberg': 'BLOOMBERG_API_KEY',
@@ -187,68 +186,37 @@ class RealTimeDataValidator:
             'value': weighted_value,
             'confidence': confidence,
             'sources': list(validated_points.keys()),
-            'timestamp': datetime.now(),
-            'validation_details': validated_points
+            'timestamp': datetime.now()
         }
 
     def get_source_weight(self, source_name):
-        """Get reliability weight for each data source"""
+        """Get weight for each data source based on reliability"""
         weights = {
-            'World Bank': 0.9,
-            'Bloomberg': 0.85,
-            'Reuters': 0.85,
+            'World Bank': 1.0,
+            'Bloomberg': 0.9,
+            'Reuters': 0.9,
+            'Market Data': 0.8,
             'IMF': 0.9,
-            'Yahoo Finance': 0.8,
             'Alpha Vantage': 0.8,
-            'CoinGecko': 0.75,
-            'DeFi Pulse': 0.75
+            'CoinGecko': 0.7,
+            'DeFi Pulse': 0.7
         }
-        return weights.get(source_name, 0.7)
+        return weights.get(source_name, 0.5)
 
-    async def fetch_data(self, session, source_name, metric_type, identifier):
-        """Fetch data from specific sources with error handling"""
+    async def fetch_market_data(self, symbol):
+        """Fetch market data using pandas_datareader instead of yfinance"""
         try:
-            if source_name == 'World Bank':
-                return await self.fetch_world_bank_data(metric_type, identifier)
-            elif source_name == 'Alpha Vantage':
-                return await self.fetch_alpha_vantage_data(session, metric_type, identifier)
-            # Add more source-specific fetching methods
-            else:
-                return await self.fetch_generic_data(session, source_name, metric_type, identifier)
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=30)
+            df = web.DataReader(symbol, 'yahoo', start_date, end_date)
+            return df['Adj Close'][-1]
         except Exception as e:
-            st.warning(f"Error fetching data from {source_name}: {str(e)}")
+            st.error(f"Error fetching market data: {str(e)}")
             return None
-
-    async def fetch_world_bank_data(self, metric_type, identifier):
-        """Fetch World Bank data"""
-        try:
-            data = wb.data.DataFrame(metric_type, economy=identifier)
-            return data.iloc[-1, 0] if not data.empty else None
-        except Exception as e:
-            return None
-
-    async def fetch_alpha_vantage_data(self, session, metric_type, identifier):
-        """Fetch Alpha Vantage data"""
-        try:
-            url = f"https://www.alphavantage.co/query"
-            params = {
-                "function": "GLOBAL_QUOTE",
-                "symbol": identifier,
-                "apikey": self.sources['Alpha Vantage']
-            }
-            async with session.get(url, params=params) as response:
-                data = await response.json()
-                return float(data["Global Quote"]["05. price"]) if "Global Quote" in data else None
-        except Exception as e:
-            return None
-
-    async def fetch_generic_data(self, session, source_name, metric_type, identifier):
-        """Generic data fetching method"""
-        # Implement generic data fetching logic
-        return None
 
 def create_global_risk_map():
     """Create enhanced interactive global risk map"""
+    # Get comprehensive World Bank indicators
     indicators = {
         'PV.EST': 'Political Stability',
         'CC.EST': 'Control of Corruption',
@@ -258,17 +226,12 @@ def create_global_risk_map():
         'VA.EST': 'Voice and Accountability'
     }
     
+    # Get data for all indicators
     wb_data = {}
     for code in indicators.keys():
-        try:
-            wb_data[code] = wb.data.DataFrame(code, time=range(2020, 2024), labels=True)
-        except Exception as e:
-            st.warning(f"Error fetching {indicators[code]} data: {str(e)}")
+        wb_data[code] = wb.data.DataFrame(code, time=range(2020, 2024), labels=True)
     
-    if not wb_data:
-        st.error("Unable to fetch risk data for map visualization")
-        return None
-
+    # Create enhanced choropleth map
     fig = px.choropleth(
         wb_data['PV.EST'],
         locations=wb_data['PV.EST'].index.get_level_values(0),
@@ -282,15 +245,16 @@ def create_global_risk_map():
         height=800
     )
     
+    # Enhanced hover information
     hover_template = "<b>%{hovertext}</b><br><br>"
     for code, name in indicators.items():
-        if code in wb_data:
-            hover_template += f"{name}: " + "%{customdata['" + code + "']:.2f}<br>"
+        hover_template += f"{name}: " + "%{customdata['" + code + "']:.2f}<br>"
     
     fig.update_traces(
         hovertemplate=hover_template + "<extra></extra>"
     )
     
+    # Update layout for better visualization
     fig.update_layout(
         geo=dict(
             showframe=False,
@@ -301,29 +265,9 @@ def create_global_risk_map():
             countrycolor='rgb(204, 204, 204)',
             coastlinecolor='rgb(204, 204, 204)',
             showocean=True,
-            oceancolor='rgb(230, 230, 230)',
-            lataxis=dict(
-                showgrid=True,
-                gridwidth=0.5,
-                gridcolor='rgba(102, 102, 102, 0.5)'
-            ),
-            lonaxis=dict(
-                showgrid=True,
-                gridwidth=0.5,
-                gridcolor='rgba(102, 102, 102, 0.5)'
-            )
+            oceancolor='rgb(230, 230, 230)'
         ),
-        margin=dict(l=0, r=0, t=30, b=0),
-        updatemenus=[dict(
-            type="buttons",
-            showactive=False,
-            buttons=[dict(
-                label="Play",
-                method="animate",
-                args=[None, {"frame": {"duration": 1000, "redraw": True},
-                           "fromcurrent": True}]
-            )]
-        )]
+        margin=dict(l=0, r=0, t=30, b=0)
     )
     
     return fig
@@ -336,7 +280,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Enhanced dark theme with deep green CSS
+# CSS styling
 st.markdown("""
     <style>
     .main {
@@ -382,42 +326,17 @@ st.markdown("""
         text-align: center;
         border: 1px solid #00A36C;
     }
-    .risk-high {
-        color: #FF4B4B;
-        font-weight: bold;
-    }
-    .risk-medium {
-        color: #FFA500;
-        font-weight: bold;
-    }
-    .risk-low {
-        color: #00A36C;
-        font-weight: bold;
-    }
-    .data-source {
-        font-size: 0.8em;
-        color: #888888;
-        font-style: italic;
-    }
-    .confidence-high {
-        background-color: rgba(0, 163, 108, 0.1);
-        border-left: 3px solid #00A36C;
-        padding: 5px 10px;
-    }
-    .confidence-medium {
-        background-color: rgba(255, 165, 0, 0.1);
-        border-left: 3px solid #FFA500;
-        padding: 5px 10px;
-    }
-    .confidence-low {
-        background-color: rgba(255, 75, 75, 0.1);
-        border-left: 3px solid #FF4B4B;
-        padding: 5px 10px;
-    }
+    .confidence-high { background-color: rgba(0, 255, 0, 0.1); }
+    .confidence-medium { background-color: rgba(255, 255, 0, 0.1); }
+    .confidence-low { background-color: rgba(255, 0, 0, 0.1); }
+    .risk-high { color: #ff4444; }
+    .risk-medium { color: #ffbb33; }
+    .risk-low { color: #00C851; }
+    .data-source { font-size: 0.8em; color: #888; }
     </style>
 """, unsafe_allow_html=True)
 
-# Initialize data validator
+# Initialize validator
 data_validator = RealTimeDataValidator()
 
 # Sidebar navigation
@@ -447,10 +366,6 @@ with st.sidebar:
                 list(INDUSTRY_FOCUS[selected_industry]["metrics"].keys()),
                 format_func=lambda x: INDUSTRY_FOCUS[selected_industry]["metrics"][x]
             )
-            
-            st.write("### Data Sources")
-            for source in INDUSTRY_FOCUS[selected_industry]["data_sources"]:
-                st.info(source)
 
 # Main content based on selected page
 if page == "Risk Analysis":
@@ -464,8 +379,7 @@ if page == "Risk Analysis":
     # Global Risk Map
     st.subheader("Global Risk Distribution")
     risk_map = create_global_risk_map()
-    if risk_map:
-        st.plotly_chart(risk_map, use_container_width=True)
+    st.plotly_chart(risk_map, use_container_width=True)
     
     # Country Selection
     selected_country = st.selectbox(
