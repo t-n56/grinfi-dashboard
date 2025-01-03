@@ -3,153 +3,653 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
+import yfinance as yf
+import pandas_datareader as pdr
 from datetime import datetime, timedelta
+import requests
+import wbgapi as wb
+from alpha_vantage.timeseries import TimeSeries
+from newsapi import NewsApiClient
+from forex_python.converter import CurrencyRates
+from countryinfo import CountryInfo
+import asyncio
+import aiohttp
+from pytrends.request import TrendReq
+import feedparser
+import ccxt
+import time
 
-# Industry-specific risk data generator
-def generate_industry_data():
-    industries = ['DeFi', 'Energy', 'Finance', 'Defense']
-    countries = px.data.gapminder().country.unique()
+# Industry-specific metrics and data sources
+INDUSTRY_FOCUS = {
+    "DeFi": {
+        "risk_factors": [
+            "Smart Contract Vulnerabilities",
+            "Protocol Security",
+            "Liquidity Risk",
+            "Regulatory Changes",
+            "Market Manipulation",
+            "Oracle Failures",
+            "Network Congestion",
+            "Governance Risks"
+        ],
+        "metrics": {
+            "TVL": "Total Value Locked",
+            "Protocol_Revenue": "Daily Revenue",
+            "User_Activity": "Daily Active Users",
+            "Gas_Costs": "Transaction Costs",
+            "Hack_Events": "Security Incidents",
+            "APY": "Average Yield",
+            "Liquidity_Depth": "Market Depth",
+            "Governance_Participation": "Voter Turnout"
+        },
+        "data_sources": [
+            "CoinGecko API",
+            "DeFi Pulse Index",
+            "Ethereum Network Data",
+            "DeFi Llama",
+            "Dune Analytics",
+            "The Graph Protocol"
+        ]
+    },
+    "Energy": {
+        "risk_factors": [
+            "Environmental Regulations",
+            "Resource Depletion",
+            "Geopolitical Disruptions",
+            "Infrastructure Vulnerability",
+            "Price Volatility",
+            "Supply Chain Risk",
+            "Climate Policy Changes",
+            "Technology Disruption"
+        ],
+        "metrics": {
+            "Production": "Daily Production Rates",
+            "Price_Volatility": "Price Change %",
+            "Environmental_Impact": "Carbon Emissions",
+            "Infrastructure_Status": "Facility Status",
+            "Supply_Chain": "Supply Chain Disruptions",
+            "Renewable_Mix": "Renewable Energy %",
+            "Grid_Stability": "Grid Reliability",
+            "Storage_Levels": "Energy Storage"
+        },
+        "data_sources": [
+            "EIA Data",
+            "World Bank Energy",
+            "IEA Statistics",
+            "EPA Reports",
+            "Bloomberg NEF",
+            "S&P Global Platts"
+        ]
+    },
+    "Defense": {
+        "risk_factors": [
+            "Geopolitical Tensions",
+            "Cyber Warfare",
+            "Supply Chain Security",
+            "Technology Obsolescence",
+            "Regulatory Compliance",
+            "Personnel Security",
+            "Information Warfare",
+            "Alliance Stability"
+        ],
+        "metrics": {
+            "Threat_Level": "Global Threat Index",
+            "Cyber_Incidents": "Security Breaches",
+            "Supply_Chain": "Supply Chain Risk Score",
+            "Tech_Readiness": "Technology Readiness Level",
+            "Personnel_Risk": "Security Clearance Status",
+            "Defense_Spending": "Military Expenditure",
+            "R&D_Investment": "Research Investment",
+            "Operational_Readiness": "Force Readiness"
+        },
+        "data_sources": [
+            "Defense Industry Reports",
+            "Military Spending Data",
+            "Cyber Threat Intelligence",
+            "Global Conflict Database",
+            "NATO Statistics",
+            "SIPRI Database"
+        ]
+    }
+}
+
+class RealTimeDataValidator:
+    def __init__(self):
+        self.sources = {
+            'World Bank': wb.data,
+            'Alpha Vantage': TimeSeries(key='YOUR_AV_KEY'),
+            'Yahoo Finance': yf,
+            'IMF': 'IMF_API_KEY',
+            'Reuters': 'REUTERS_API_KEY',
+            'Bloomberg': 'BLOOMBERG_API_KEY',
+            'CoinGecko': 'COINGECKO_API_KEY',
+            'DeFi Pulse': 'DEFIPULSE_API_KEY'
+        }
+        self.exchange = ccxt.binance()
+        self.pytrends = TrendReq()
+        self.last_update = {}
+        self.update_interval = 60
+        self.confidence_threshold = 0.7
+
+    async def get_cross_validated_data(self, metric_type, identifier):
+        """Get real-time data from multiple sources and cross-validate"""
+        data_points = {}
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for source_name, source in self.sources.items():
+                tasks.append(self.fetch_data(session, source_name, metric_type, identifier))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for source_name, result in zip(self.sources.keys(), results):
+                if not isinstance(result, Exception):
+                    data_points[source_name] = result
+
+        validated_data = self.cross_validate_data_points(data_points)
+        return validated_data
+
+    def cross_validate_data_points(self, data_points):
+        """Cross-validate data from different sources with enhanced validation"""
+        if not data_points:
+            return None
+
+        values = [v for v in data_points.values() if v is not None]
+        if not values:
+            return None
+
+        median = np.median(values)
+        std = np.std(values)
+
+        # Enhanced validation with weighted confidence
+        validated_points = {}
+        for source, value in data_points.items():
+            if value is not None:
+                z_score = abs((value - median) / std) if std > 0 else 0
+                if z_score <= 2:  # Within 2 standard deviations
+                    source_weight = self.get_source_weight(source)
+                    validated_points[source] = {
+                        'value': value,
+                        'weight': source_weight,
+                        'z_score': z_score
+                    }
+
+        if not validated_points:
+            return None
+
+        # Calculate weighted average and confidence
+        total_weight = sum(point['weight'] for point in validated_points.values())
+        weighted_value = sum(point['value'] * point['weight'] 
+                           for point in validated_points.values()) / total_weight
+        
+        confidence = (len(validated_points) / len(data_points)) * \
+                    (1 - np.mean([point['z_score'] for point in validated_points.values()]) / 2)
+
+        return {
+            'value': weighted_value,
+            'confidence': confidence,
+            'sources': list(validated_points.keys()),
+            'timestamp': datetime.now(),
+            'validation_details': validated_points
+        }
+
+    def get_source_weight(self, source_name):
+        """Get reliability weight for each data source"""
+        weights = {
+            'World Bank': 0.9,
+            'Bloomberg': 0.85,
+            'Reuters': 0.85,
+            'IMF': 0.9,
+            'Yahoo Finance': 0.8,
+            'Alpha Vantage': 0.8,
+            'CoinGecko': 0.75,
+            'DeFi Pulse': 0.75
+        }
+        return weights.get(source_name, 0.7)
+
+    async def fetch_data(self, session, source_name, metric_type, identifier):
+        """Fetch data from specific sources with error handling"""
+        try:
+            if source_name == 'World Bank':
+                return await self.fetch_world_bank_data(metric_type, identifier)
+            elif source_name == 'Alpha Vantage':
+                return await self.fetch_alpha_vantage_data(session, metric_type, identifier)
+            # Add more source-specific fetching methods
+            else:
+                return await self.fetch_generic_data(session, source_name, metric_type, identifier)
+        except Exception as e:
+            st.warning(f"Error fetching data from {source_name}: {str(e)}")
+            return None
+
+    async def fetch_world_bank_data(self, metric_type, identifier):
+        """Fetch World Bank data"""
+        try:
+            data = wb.data.DataFrame(metric_type, economy=identifier)
+            return data.iloc[-1, 0] if not data.empty else None
+        except Exception as e:
+            return None
+
+    async def fetch_alpha_vantage_data(self, session, metric_type, identifier):
+        """Fetch Alpha Vantage data"""
+        try:
+            url = f"https://www.alphavantage.co/query"
+            params = {
+                "function": "GLOBAL_QUOTE",
+                "symbol": identifier,
+                "apikey": self.sources['Alpha Vantage']
+            }
+            async with session.get(url, params=params) as response:
+                data = await response.json()
+                return float(data["Global Quote"]["05. price"]) if "Global Quote" in data else None
+        except Exception as e:
+            return None
+
+    async def fetch_generic_data(self, session, source_name, metric_type, identifier):
+        """Generic data fetching method"""
+        # Implement generic data fetching logic
+        return None
+
+def create_global_risk_map():
+    """Create enhanced interactive global risk map"""
+    indicators = {
+        'PV.EST': 'Political Stability',
+        'CC.EST': 'Control of Corruption',
+        'RQ.EST': 'Regulatory Quality',
+        'RL.EST': 'Rule of Law',
+        'GE.EST': 'Government Effectiveness',
+        'VA.EST': 'Voice and Accountability'
+    }
     
-    data = []
-    for industry in industries:
-        for country in countries:
-            data.append({
-                'country': country,
-                'industry': industry,
-                'political_risk': np.random.uniform(3, 9),
-                'economic_risk': np.random.uniform(4, 8),
-                'cyber_risk': np.random.uniform(5, 9),
-                'environmental_risk': np.random.uniform(4, 9),
-                'regulatory_risk': np.random.uniform(4, 9),
-                'industry_specific_risk': np.random.uniform(5, 9),
-                'last_updated': datetime.now() - timedelta(minutes=np.random.randint(0, 60))
-            })
-    return pd.DataFrame(data)
-
-# Page config
-st.set_page_config(layout="wide", page_title="Grinfi Industry Risk Monitor", page_icon="🛡️")
-
-# Enhanced sidebar with industry filters
-with st.sidebar:
-    st.title("Industry Risk Monitor")
+    wb_data = {}
+    for code in indicators.keys():
+        try:
+            wb_data[code] = wb.data.DataFrame(code, time=range(2020, 2024), labels=True)
+        except Exception as e:
+            st.warning(f"Error fetching {indicators[code]} data: {str(e)}")
     
-    # Industry selector
-    selected_industry = st.selectbox(
-        "Industry Focus",
-        ["DeFi", "Energy", "Finance", "Defense"],
-        help="Select industry for detailed analysis"
+    if not wb_data:
+        st.error("Unable to fetch risk data for map visualization")
+        return None
+
+    fig = px.choropleth(
+        wb_data['PV.EST'],
+        locations=wb_data['PV.EST'].index.get_level_values(0),
+        locationmode='ISO-3',
+        color='value',
+        hover_name=wb_data['PV.EST'].index.get_level_values(0),
+        color_continuous_scale='RdYlGn_r',
+        title='Global Risk Assessment',
+        labels={'value': 'Risk Score'},
+        animation_frame=wb_data['PV.EST'].index.get_level_values(1),
+        height=800
     )
     
-    # Risk type selector
-    risk_type = st.selectbox(
-        "Risk Type",
-        ["Political", "Economic", "Cyber", "Environmental", "Regulatory", "Industry Specific"]
+    hover_template = "<b>%{hovertext}</b><br><br>"
+    for code, name in indicators.items():
+        if code in wb_data:
+            hover_template += f"{name}: " + "%{customdata['" + code + "']:.2f}<br>"
+    
+    fig.update_traces(
+        hovertemplate=hover_template + "<extra></extra>"
     )
     
-    # Industry-specific filters
-    st.subheader(f"{selected_industry} Specific Filters")
+    fig.update_layout(
+        geo=dict(
+            showframe=False,
+            showcoastlines=True,
+            projection_type='equirectangular',
+            showland=True,
+            landcolor='rgb(243, 243, 243)',
+            countrycolor='rgb(204, 204, 204)',
+            coastlinecolor='rgb(204, 204, 204)',
+            showocean=True,
+            oceancolor='rgb(230, 230, 230)',
+            lataxis=dict(
+                showgrid=True,
+                gridwidth=0.5,
+                gridcolor='rgba(102, 102, 102, 0.5)'
+            ),
+            lonaxis=dict(
+                showgrid=True,
+                gridwidth=0.5,
+                gridcolor='rgba(102, 102, 102, 0.5)'
+            )
+        ),
+        margin=dict(l=0, r=0, t=30, b=0),
+        updatemenus=[dict(
+            type="buttons",
+            showactive=False,
+            buttons=[dict(
+                label="Play",
+                method="animate",
+                args=[None, {"frame": {"duration": 1000, "redraw": True},
+                           "fromcurrent": True}]
+            )]
+        )]
+    )
     
-    if selected_industry == "DeFi":
-        st.multiselect("Protocol Type", ["DEX", "Lending", "Yield", "Bridge"])
-        st.slider("TVL Range ($M)", 0, 1000, (100, 500))
-        
-    elif selected_industry == "Energy":
-        st.multiselect("Energy Type", ["Renewable", "Nuclear", "Fossil Fuels"])
-        st.slider("Carbon Impact", 0, 100, 50)
-        
-    elif selected_industry == "Finance":
-        st.multiselect("Institution Type", ["Banks", "Insurance", "Investment"])
-        st.slider("Market Cap ($B)", 0, 1000, (50, 200))
-        
-    elif selected_industry == "Defense":
-        st.multiselect("Sector", ["Cybersecurity", "Aerospace", "Maritime"])
-        st.slider("Contract Value ($M)", 0, 5000, (100, 1000))
+    return fig
 
-# Main content
-st.title(f"🎯 {selected_industry} Industry Risk Intelligence")
-
-# Generate industry-specific data
-industry_data = generate_industry_data()
-filtered_data = industry_data[industry_data['industry'] == selected_industry]
-
-# Industry-specific metrics
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    avg_risk = filtered_data[f"{risk_type.lower()}_risk"].mean()
-    st.metric(f"Average {risk_type} Risk", f"{avg_risk:.1f}", f"{np.random.uniform(-0.5, 0.5):.1f}")
-
-with col2:
-    if selected_industry == "DeFi":
-        st.metric("Total TVL", "$1.2B", "-2.3%")
-    elif selected_industry == "Energy":
-        st.metric("Energy Output", "2.4 GW", "+1.2%")
-    elif selected_industry == "Finance":
-        st.metric("Market Activity", "$3.4T", "+0.8%")
-    elif selected_industry == "Defense":
-        st.metric("Contract Volume", "$2.1B", "+5.2%")
-
-with col3:
-    high_risk = len(filtered_data[filtered_data[f"{risk_type.lower()}_risk"] > 7])
-    st.metric("High Risk Regions", high_risk, f"+{np.random.randint(1,3)}")
-
-with col4:
-    st.metric("Risk Trend", "Stable", "↔")
-
-# Industry-specific map
-fig = go.Figure(data=go.Choropleth(
-    locations=filtered_data['country'],
-    locationmode='country names',
-    z=filtered_data[f"{risk_type.lower()}_risk"],
-    colorscale='RdYlGn_r',
-    marker_line_color='darkgray',
-    marker_line_width=0.5,
-    colorbar_title=f'{risk_type} Risk Level'
-))
-
-fig.update_layout(
-    title=f'Global {selected_industry} {risk_type} Risk Levels',
-    height=600
+# Page configuration
+st.set_page_config(
+    page_title="Grinfi ERM Platform",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.plotly_chart(fig, use_container_width=True)
+# Enhanced dark theme with deep green CSS
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0A1F1C;
+        color: #E6F3E6;
+    }
+    .headline {
+        font-size: 3em;
+        color: #00A36C;
+        margin-bottom: 1em;
+        text-align: center;
+        font-weight: bold;
+    }
+    .subheadline {
+        font-size: 1.8em;
+        color: #E6F3E6;
+        margin-bottom: 2em;
+        text-align: center;
+        line-height: 1.6;
+    }
+    .section-title {
+        color: #00A36C;
+        font-size: 2.2em;
+        margin: 1.5em 0 1em 0;
+        text-align: center;
+    }
+    .feature-card {
+        background-color: #1A2C28;
+        padding: 25px;
+        border-radius: 15px;
+        border: 1px solid #2C3C38;
+        margin: 15px 0;
+        transition: transform 0.3s ease;
+    }
+    .feature-card:hover {
+        transform: translateY(-5px);
+        border-color: #00A36C;
+    }
+    .metric-card {
+        background-color: #1A2C28;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        border: 1px solid #00A36C;
+    }
+    .risk-high {
+        color: #FF4B4B;
+        font-weight: bold;
+    }
+    .risk-medium {
+        color: #FFA500;
+        font-weight: bold;
+    }
+    .risk-low {
+        color: #00A36C;
+        font-weight: bold;
+    }
+    .data-source {
+        font-size: 0.8em;
+        color: #888888;
+        font-style: italic;
+    }
+    .confidence-high {
+        background-color: rgba(0, 163, 108, 0.1);
+        border-left: 3px solid #00A36C;
+        padding: 5px 10px;
+    }
+    .confidence-medium {
+        background-color: rgba(255, 165, 0, 0.1);
+        border-left: 3px solid #FFA500;
+        padding: 5px 10px;
+    }
+    .confidence-low {
+        background-color: rgba(255, 75, 75, 0.1);
+        border-left: 3px solid #FF4B4B;
+        padding: 5px 10px;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# Industry-specific insights
-st.subheader(f"{selected_industry} Specific Insights")
+# Initialize data validator
+data_validator = RealTimeDataValidator()
 
-# Create tabs for different analyses
-tab1, tab2, tab3 = st.tabs(["Risk Analysis", "Trends", "Recommendations"])
-
-with tab1:
-    # Radar chart for risk types
-    categories = ['Political', 'Economic', 'Cyber', 'Environmental', 'Regulatory']
-    values = [filtered_data[f"{cat.lower()}_risk"].mean() for cat in categories]
+# Sidebar navigation
+with st.sidebar:
+    page = st.radio(
+        "Navigation",
+        ["Home", "Risk Analysis", "Industry Focus", "Trends", "Contact"]
+    )
     
-    fig = go.Figure(data=go.Scatterpolar(
-        r=values,
-        theta=categories,
-        fill='toself'
-    ))
-    fig.update_layout(title=f"{selected_industry} Risk Profile")
-    st.plotly_chart(fig)
+    if page == "Industry Focus":
+        st.subheader("Industry Selection")
+        selected_industry = st.selectbox(
+            "Select Industry",
+            list(INDUSTRY_FOCUS.keys())
+        )
+        
+        if selected_industry:
+            st.write("### Risk Factors")
+            selected_risks = st.multiselect(
+                "Select Risk Factors",
+                INDUSTRY_FOCUS[selected_industry]["risk_factors"]
+            )
+            
+            st.write("### Key Metrics")
+            selected_metrics = st.multiselect(
+                "Select Metrics",
+                list(INDUSTRY_FOCUS[selected_industry]["metrics"].keys()),
+                format_func=lambda x: INDUSTRY_FOCUS[selected_industry]["metrics"][x]
+            )
+            
+            st.write("### Data Sources")
+            for source in INDUSTRY_FOCUS[selected_industry]["data_sources"]:
+                st.info(source)
 
-with tab2:
-    # Trend line for selected risk type
-    dates = pd.date_range(start='2024-01-01', periods=30)
-    trend_data = pd.DataFrame({
-        'date': dates,
-        'risk_score': np.cumsum(np.random.normal(0, 0.1, 30)) + 7
-    })
-    fig = px.line(trend_data, x='date', y='risk_score', title=f"{risk_type} Risk Trend")
-    st.plotly_chart(fig)
+# Main content based on selected page
+if page == "Risk Analysis":
+    st.title("Real-Time Risk Monitoring Dashboard")
+    
+    # Auto-refresh setup
+    auto_refresh = st.sidebar.checkbox("Enable Auto-Refresh", value=True)
+    refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", 
+                                       min_value=30, max_value=300, value=60)
+    
+    # Global Risk Map
+    st.subheader("Global Risk Distribution")
+    risk_map = create_global_risk_map()
+    if risk_map:
+        st.plotly_chart(risk_map, use_container_width=True)
+    
+    # Country Selection
+    selected_country = st.selectbox(
+        "Select Country for Detailed Analysis",
+        wb.economy.list(labels=True)
+    )
+    
+    if selected_country:
+        # Create three columns for metrics
+        col1, col2, col3 = st.columns(3)
+        
+        # Real-time metrics container
+        metrics_container = st.container()
+        
+        while auto_refresh:
+            with metrics_container:
+                # Get cross-validated real-time data
+                async def update_metrics():
+                    political_risk = await data_validator.get_cross_validated_data(
+                        'political_risk', selected_country)
+                    economic_risk = await data_validator.get_cross_validated_data(
+                        'economic_risk', selected_country)
+                    market_risk = await data_validator.get_cross_validated_data(
+                        'market_risk', selected_country)
+                    
+                    return political_risk, economic_risk, market_risk
+                
+                # Update metrics
+                political_risk, economic_risk, market_risk = asyncio.run(update_metrics())
+                
+                # Display metrics with confidence levels
+                with col1:
+                    if political_risk:
+                        confidence_class = (
+                            'confidence-high' if political_risk['confidence'] > 0.8
+                            else 'confidence-medium' if political_risk['confidence'] > 0.6
+                            else 'confidence-low'
+                        )
+                        st.markdown(f"""
+                            <div class="{confidence_class}">
+                                <h3>Political Risk Score</h3>
+                                <p class="risk-{'high' if political_risk['value'] > 7 
+                                              else 'medium' if political_risk['value'] > 4 
+                                              else 'low'}">
+                                    {political_risk['value']:.2f}
+                                </p>
+                                <p>Confidence: {political_risk['confidence']:.1%}</p>
+                                <p class="data-source">Sources: {', '.join(political_risk['sources'])}</p>
+                            </div>
+                        """, unsafe_allow_html=True)
+                
+                with col2:
+                    if economic_risk:
+                        confidence_class = (
+                            'confidence-high' if economic_risk['confidence'] > 0.8
+                            else 'confidence-medium' if economic_risk['confidence'] > 0.6
+                            else 'confidence-low'
+                        )
+                        st.markdown(f"""
+                            <div class="{confidence_class}">
+                                <h3>Economic Risk Score</h3>
+                                <p class="risk-{'high' if economic_risk['value'] > 7 
+                                              else 'medium' if economic_risk['value'] > 4 
+                                              else 'low'}">
+                                    {economic_risk['value']:.2f}
+                                </p>
+                                <p>Confidence: {economic_risk['confidence']:.1%}</p>
+                                <p class="data-source">Sources: {', '.join(economic_risk['sources'])}</p>
+                            </div>
+                        """, unsafe_allow_html=True)
+                
+                with col3:
+                    if market_risk:
+                        confidence_class = (
+                            'confidence-high' if market_risk['confidence'] > 0.8
+                            else 'confidence-medium' if market_risk['confidence'] > 0.6
+                            else 'confidence-low'
+                        )
+                        st.markdown(f"""
+                            <div class="{confidence_class}">
+                                <h3>Market Risk Score</h3>
+                                <p class="risk-{'high' if market_risk['value'] > 7 
+                                              else 'medium' if market_risk['value'] > 4 
+                                              else 'low'}">
+                                    {market_risk['value']:.2f}
+                                </p>
+                                <p>Confidence: {market_risk['confidence']:.1%}</p>
+                                <p class="data-source">Sources: {', '.join(market_risk['sources'])}</p>
+                            </div>
+                        """, unsafe_allow_html=True)
+                
+                # Update timestamp
+                st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Wait for next refresh
+            time.sleep(refresh_interval)
 
-with tab3:
-    # Industry-specific recommendations
+elif page == "Industry Focus":
+    st.title(f"{selected_industry} Industry Analysis")
+    
     if selected_industry == "DeFi":
-        st.info("• Implement additional smart contract audits\n• Enhance liquidity monitoring\n• Update security protocols")
+        # DeFi-specific metrics and visualizations
+        defi_data = {
+            'tvl': np.random.uniform(1000000, 10000000),
+            'protocol_revenue': np.random.uniform(10000, 100000),
+            'user_activity': np.random.randint(1000, 10000),
+            'security_incidents': np.random.randint(0, 10)
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Value Locked", f"${defi_data['tvl']:,.2f}")
+        with col2:
+            st.metric("Protocol Revenue", f"${defi_data['protocol_revenue']:,.2f}")
+        with col3:
+            st.metric("Active Users", f"{defi_data['user_activity']:,}")
+        
+        # DeFi risk visualization
+        st.subheader("Risk Analysis")
+        fig = go.Figure(data=[
+            go.Bar(name='Security Incidents', x=['Last 30 Days'], y=[defi_data['security_incidents']]),
+            go.Bar(name='Protocol Revenue', x=['Last 30 Days'], y=[defi_data['protocol_revenue']])
+        ])
+        st.plotly_chart(fig)
+        
     elif selected_industry == "Energy":
-        st.info("• Review environmental compliance\n• Assess grid stability\n• Update emergency response plans")
-    elif selected_industry == "Finance":
-        st.info("• Strengthen fraud detection\n• Update compliance frameworks\n• Enhance cyber security")
+        # Energy-specific metrics and visualizations
+        energy_data = {
+            'production_rates': np.random.uniform(1000, 5000),
+            'environmental_impact': np.random.uniform(0, 100),
+            'supply_chain': np.random.uniform(0, 10)
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Production Rate", f"{energy_data['production_rates']:,.2f} MWh")
+        with col2:
+            st.metric("Environmental Impact", f"{energy_data['environmental_impact']:.1f}%")
+        with col3:
+            st.metric("Supply Chain Risk", f"{energy_data['supply_chain']:.1f}/10")
+        
+        # Energy risk visualization
+        st.subheader("Risk Analysis")
+        fig = go.Figure(data=[
+            go.Scatter(x=['Production', 'Environment', 'Supply Chain'], 
+                      y=[energy_data['production_rates'], 
+                         energy_data['environmental_impact'], 
+                         energy_data['supply_chain']])
+        ])
+        st.plotly_chart(fig)
+        
     elif selected_industry == "Defense":
-        st.info("• Review supply chain security\n• Enhance data protection\n• Update crisis response protocols")
+        # Defense-specific metrics and visualizations
+        defense_data = {
+            'threat_levels': np.random.uniform(0, 10),
+            'cyber_incidents': np.random.randint(0, 100),
+            'supply_chain': np.random.uniform(0, 10)
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Threat Level", f"{defense_data['threat_levels']:.1f}/10")
+        with col2:
+            st.metric("Cyber Incidents", str(defense_data['cyber_incidents']))
+        with col3:
+            st.metric("Supply Chain Risk", f"{defense_data['supply_chain']:.1f}/10")
+        
+        # Defense risk visualization
+        st.subheader("Risk Analysis")
+        fig = go.Figure(data=[
+            go.Radar(
+                r=[defense_data['threat_levels'], 
+                   defense_data['cyber_incidents']/10, 
+                   defense_data['supply_chain']],
+                theta=['Threats', 'Cyber', 'Supply Chain']
+            )
+        ])
+        st.plotly_chart(fig)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+    <div style='text-align: center; padding: 20px;'>
+        <p style='color: #00A36C; font-size: 1.2em;'>Grinfi Consulting | Driving Innovation in Risk Analysis</p>
+        <p>Contact Us: info@grinfi.com | <a href="#" style='color: #00A36C;'>LinkedIn</a> | <a href="#" style='color: #00A36C;'>Twitter</a></p>
+    </div>
+""", unsafe_allow_html=True)
