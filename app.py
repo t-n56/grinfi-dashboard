@@ -3,7 +3,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-import pandas_datareader.data as web  # Replaced yfinance
 from datetime import datetime, timedelta
 import requests
 import wbgapi as wb
@@ -117,12 +116,9 @@ class RealTimeDataValidator:
         self.sources = {
             'World Bank': wb.data,
             'Alpha Vantage': TimeSeries(key='YOUR_AV_KEY'),
-            'Market Data': web,  # Changed from yfinance to pandas_datareader
             'IMF': 'IMF_API_KEY',
             'Reuters': 'REUTERS_API_KEY',
-            'Bloomberg': 'BLOOMBERG_API_KEY',
-            'CoinGecko': 'COINGECKO_API_KEY',
-            'DeFi Pulse': 'DEFIPULSE_API_KEY'
+            'Bloomberg': 'BLOOMBERG_API_KEY'
         }
         self.exchange = ccxt.binance()
         self.pytrends = TrendReq()
@@ -195,23 +191,50 @@ class RealTimeDataValidator:
             'World Bank': 1.0,
             'Bloomberg': 0.9,
             'Reuters': 0.9,
-            'Market Data': 0.8,
-            'IMF': 0.9,
             'Alpha Vantage': 0.8,
-            'CoinGecko': 0.7,
-            'DeFi Pulse': 0.7
+            'IMF': 0.9
         }
         return weights.get(source_name, 0.5)
 
     async def fetch_market_data(self, symbol):
-        """Fetch market data using pandas_datareader instead of yfinance"""
+        """Fetch market data using Alpha Vantage"""
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=30)
-            df = web.DataReader(symbol, 'yahoo', start_date, end_date)
-            return df['Adj Close'][-1]
+            ts = TimeSeries(key='YOUR_AV_KEY')
+            data, _ = ts.get_quote_endpoint(symbol)
+            return float(data['05. price'])
         except Exception as e:
             st.error(f"Error fetching market data: {str(e)}")
+            return None
+
+    async def fetch_data(self, session, source_name, metric_type, identifier):
+        """Fetch data from various sources"""
+        try:
+            if source_name == 'World Bank':
+                return await self.fetch_wb_data(metric_type, identifier)
+            elif source_name == 'Alpha Vantage':
+                return await self.fetch_market_data(identifier)
+            # Add more data source fetching methods as needed
+            return None
+        except Exception as e:
+            st.error(f"Error fetching data from {source_name}: {str(e)}")
+            return None
+
+    async def fetch_wb_data(self, metric_type, country_code):
+        """Fetch World Bank data"""
+        try:
+            if metric_type == 'political_risk':
+                indicator = 'PV.EST'
+            elif metric_type == 'economic_risk':
+                indicator = 'NY.GDP.MKTP.KD.ZG'
+            else:
+                indicator = 'FP.CPI.TOTL.ZG'
+            
+            data = wb.data.DataFrame(indicator, economy=country_code, time=datetime.now().year-1)
+            if not data.empty:
+                return data.iloc[0, 0]
+            return None
+        except Exception as e:
+            st.error(f"Error fetching World Bank data: {str(e)}")
             return None
 
 def create_global_risk_map():
